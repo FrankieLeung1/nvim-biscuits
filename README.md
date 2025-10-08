@@ -31,7 +31,20 @@ use {
      run = ':TSUpdate'
   },
 }
+```
 
+Using Lazy:
+
+```lua
+return {
+  'code-biscuits/nvim-biscuits',
+  dependencies = {
+    'nvim-treesitter/nvim-treesitter',
+  },
+  opts = {
+    -- Config goes here
+  }
+}
 ```
 
 You will also need to configure which language parsers you want to have enabled for tree-sitter. "maintained" currently will install 40 languages. "all" will install even more.
