@@ -2,11 +2,12 @@ local utils = require("nvim-biscuits.utils")
 
 local language = {}
 
-local function get_node_last_line(ts_node)
-    local bufnr = vim.api.nvim_get_current_buf()
+local function get_node_last_line(ts_node, bufnr, all_lines)
+    local start_row, start_col, end_row, end_col = ts_node:range()
 
-    local start_row, start_col, end_row, end_col =
-        vim.treesitter.get_node_range(ts_node)
+    if all_lines then
+        return utils.trim(all_lines[end_row + 1] or "")
+    end
 
     local end_lines = vim.api.nvim_buf_get_lines(bufnr, end_row, end_row + 1,
                                                  false)
@@ -21,9 +22,9 @@ local function get_node_last_line(ts_node)
     return end_string
 end
 
-language.should_decorate = function(ts_node, text, bufnr)
+language.should_decorate = function(ts_node, text, bufnr, all_lines)
     if string.len(text) < 8 then
-        local end_string = get_node_last_line(ts_node)
+        local end_string = get_node_last_line(ts_node, bufnr, all_lines)
         end_string = string.gsub(end_string, '/', '')
 
         if text == end_string then return false end
@@ -39,9 +40,9 @@ language.should_decorate = function(ts_node, text, bufnr)
     return false
 end
 
-language.transform_text = function(ts_node, text, bufnr)
+language.transform_text = function(ts_node, text, bufnr, all_lines)
 
-    local end_string = get_node_last_line(ts_node)
+    local end_string = get_node_last_line(ts_node, bufnr, all_lines)
     end_string = string.gsub(end_string, '/', '')
     end_string = string.gsub(end_string, '>', '')
 

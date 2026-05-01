@@ -3,13 +3,13 @@ local html = require("nvim-biscuits.languages.html")
 
 local language = {}
 
-language.should_decorate = function(ts_node, text, bufnr)
+language.should_decorate = function(ts_node, text, bufnr, all_lines)
     local type = ts_node:type()
     local elements = {"jsx_element", "jsx_self_closing_element"}
 
     local should_decorate = true
     if utils.list_contains(elements, type) then
-        should_decorate = html.should_decorate(ts_node, text, bufnr)
+        should_decorate = html.should_decorate(ts_node, text, bufnr, all_lines)
     end
 
     local ignored_element_types = {
@@ -24,8 +24,8 @@ language.should_decorate = function(ts_node, text, bufnr)
     return should_decorate
 end
 
-language.transform_text = function(ts_node, text, bufnr)
-    text = html.transform_text(ts_node, text, bufnr)
+language.transform_text = function(ts_node, text, bufnr, all_lines)
+    text = html.transform_text(ts_node, text, bufnr, all_lines)
     return utils.trim(text)
 end
 

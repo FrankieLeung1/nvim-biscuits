@@ -13,19 +13,19 @@ local handled_languages = {
     python = python
 }
 
-languages.should_decorate = function(language_name, ts_node, text, bufnr)
+languages.should_decorate = function(language_name, ts_node, text, bufnr, all_lines)
     local language = handled_languages[language_name]
 
     if language == nil then return true end
 
-    return language.should_decorate(ts_node, text, bufnr)
+    return language.should_decorate(ts_node, text, bufnr, all_lines)
 end
 
-languages.transform_text = function(language_name, ts_node, text, bufnr)
+languages.transform_text = function(language_name, ts_node, text, bufnr, all_lines)
     local language = handled_languages[language_name]
     if language == nil then return text end
 
-    return language.transform_text(ts_node, text, bufnr)
+    return language.transform_text(ts_node, text, bufnr, all_lines)
 end
 
 return languages

@@ -8,6 +8,7 @@ local final_config = config.default_config()
 local nvim_biscuits = { should_render_biscuits = true }
 local attached_buffers = {}
 local has_fallback_autocmds = false
+local timers = {}
 
 local function is_file_too_big()
     local file_size = vim.fn.wordcount().bytes
@@ -72,13 +73,7 @@ end
 
 local function cleanup_buffer_augroup(bufnr)
     local augroup_name = "Biscuits_" .. bufnr
-    vim.api.nvim_exec(string.format(
-                         [[
-                  augroup %s
-                    au!
-                  augroup END
-                  augroup! %s
-                ]], augroup_name, augroup_name), false)
+    pcall(vim.api.nvim_del_augroup_by_name, augroup_name)
 end
 
 nvim_biscuits.decorate_nodes = function(bufnr, lang)
@@ -118,130 +113,111 @@ nvim_biscuits.decorate_nodes = function(bufnr, lang)
         return
     end
 
-    local nodes = get_named_children(root)
-    local children = {}
-    local has_nodes = true
+    local all_lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+    local line_count = #all_lines
+
+    local cursor_row = nil
+    if final_config.cursor_line_only then
+        cursor_row = vim.api.nvim_win_get_cursor(0)[1] - 1
+    end
+    local min_distance = final_config.min_distance
+    local trim_by_words = config.get_language_config(final_config, language_name, "trim_by_words")
+    local max_length = config.get_language_config(final_config, language_name, "max_length")
+    local prefix_string = config.get_language_config(final_config, language_name, "prefix_string")
+
+    -- Cache hot-loop references as locals
+    local trim = utils.trim
+    local set_extmark = vim.api.nvim_buf_set_extmark
+    local should_decorate_lang = languages.should_decorate
+    local transform_text_lang = languages.transform_text
 
     vim.api.nvim_buf_clear_namespace(bufnr, biscuit_highlight_group, 0, -1)
 
-    while has_nodes do
-        for _, node in ipairs(nodes) do
-            children = utils.merge_arrays(children, get_named_children(node))
+    local stack = { root }
+    local stack_size = 1
+    while stack_size > 0 do
+        local node = stack[stack_size]
+        stack[stack_size] = nil
+        stack_size = stack_size - 1
 
-            local start_line, _, end_line, _ = vim.treesitter.get_node_range(node)
+        local start_line, _, end_line, _ = node:range()
 
-            local lines = vim.api.nvim_buf_get_lines(bufnr, start_line,
-                                                     start_line + 1, false)
-
-            local text = lines[1]
-
-            text = utils.trim(text)
-
-            local should_decorate = true
-
-            -- bail out of empty text
-            if text == "" then
-                should_decorate = false
+        -- Prune subtrees that can't possibly contain the cursor line (children
+        -- always lie within the parent's range, so this is safe).
+        if end_line - start_line >= min_distance
+            and (cursor_row == nil or (cursor_row >= start_line and cursor_row <= end_line))
+        then
+            local child_count = node:named_child_count()
+            for i = 0, child_count - 1 do
+                stack_size = stack_size + 1
+                stack[stack_size] = node:named_child(i)
             end
 
-            -- bail out of short text
-            if string.len(text) <= 1 then
-                should_decorate = false
-            end
+            local raw_text = all_lines[start_line + 1]
+            if raw_text then
+                local text = trim(raw_text)
 
-            -- bail out if start line and end line are the same
-            if start_line == end_line then
-                should_decorate = false
-            end
+                if #text > 1
+                    and (cursor_row == nil or end_line == cursor_row)
+                    and should_decorate_lang(language_name, node, text, bufnr, all_lines) ~= false
+                then
+                    if trim_by_words == true then
+                        local words = {}
+                        local n = 0
+                        for word in string.gmatch(text, "%w+") do
+                            n = n + 1
+                            words[n] = word
+                            if n >= max_length then
+                                break
+                            end
+                        end
+                        text = table.concat(words, " ")
+                    elseif #text >= max_length then
+                        text = string.sub(text, 1, max_length) .. "..."
+                    end
 
-            -- bail out distance is less than minimum distance
-            if end_line - start_line < final_config.min_distance then
-                should_decorate = false
-            end
+                    -- language specific text filter
+                    text = transform_text_lang(language_name, node, text, bufnr, all_lines)
 
-            -- bail out if this node should not be decorated based on language specific filters
-            if languages.should_decorate(language_name, node, text, bufnr) == false then
-                should_decorate = false
-            end
+                    if text ~= nil and trim(text) ~= "" then
+                        text = prefix_string .. text
 
-            -- bail out if the user has cursor line only on and we are not on their cursor line
-            local cursor = vim.api.nvim_win_get_cursor(0)
-            local should_clear = false
-            if final_config.cursor_line_only and end_line + 1 ~= cursor[1] then
-                should_decorate = false
-                should_clear = true
-            end
-
-            if should_decorate == true then
-                local trim_by_words = config.get_language_config(final_config,
-                                                                 language_name,
-                                                                 "trim_by_words")
-                local max_length = config.get_language_config(final_config,
-                                                              language_name,
-                                                              "max_length")
-
-                if trim_by_words == true then
-                    local words = {}
-                    for word in string.gmatch(text, "%w+") do
-                        words[#words + 1] = word
-                        if #words >= max_length then
-                            break
+                        -- Only set extmark if the line is within buffer bounds
+                        if end_line < line_count then
+                            set_extmark(bufnr, biscuit_highlight_group,
+                                        end_line, 0, {
+                                id = end_line + 1,
+                                virt_text_pos = "eol",
+                                virt_text = {
+                                    { text, biscuit_highlight_group_name }
+                                },
+                                hl_mode = "combine"
+                            })
                         end
                     end
-                    text = table.concat(words, " ")
-                else
-                    if string.len(text) >= max_length then
-                        text = string.sub(text, 1, max_length)
-                        text = text .. "..."
-                    end
-                end
-
-                text = text:gsub("\n", " ")
-
-                local prefix_string = config.get_language_config(final_config,
-                                                                 language_name,
-                                                                 "prefix_string")
-
-                -- language specific text filter
-                text = languages.transform_text(language_name, node, text, bufnr)
-
-                if utils.trim(text) ~= "" then
-                    text = prefix_string .. text
-
-                    -- Get the line count of the buffer
-                    local line_count = vim.api.nvim_buf_line_count(bufnr)
-
-                    -- Only set extmark if the line is within buffer bounds
-                    if end_line < line_count then
-                        vim.api.nvim_buf_clear_namespace(bufnr,
-                                                         biscuit_highlight_group,
-                                                         end_line, end_line + 1)
-                        vim.api.nvim_buf_set_extmark(bufnr,
-                                                     biscuit_highlight_group,
-                                                     end_line, 0, {
-                            virt_text_pos = "eol",
-                            virt_text = {
-                                { text, biscuit_highlight_group_name }
-                            },
-                            hl_mode = "combine"
-                        })
-                    end
                 end
             end
-
-            if should_decorate == false and should_clear == true then
-                vim.api.nvim_buf_clear_namespace(bufnr, biscuit_highlight_group,
-                                                 end_line, end_line + 1)
-            end
-        end
-
-        nodes = children
-        children = {}
-
-        if #nodes == 0 then
-            has_nodes = false
         end
     end
+end
+
+nvim_biscuits.debounced_decorate = function(bufnr, lang)
+    if bufnr == nil then
+        bufnr = vim.api.nvim_get_current_buf()
+    end
+
+    local timer = timers[bufnr]
+    if not timer then
+        timer = vim.loop.new_timer()
+        timers[bufnr] = timer
+    end
+
+    timer:stop()
+    timer:start(final_config.debounce_ms, 0, vim.schedule_wrap(function()
+        if vim.api.nvim_buf_is_valid(bufnr) then
+            nvim_biscuits.decorate_nodes(bufnr, lang)
+        end
+    end))
 end
 
 nvim_biscuits.BufferAttach = function(bufnr, lang)
@@ -281,10 +257,6 @@ nvim_biscuits.BufferAttach = function(bufnr, lang)
         return
     end
 
-    local on_lines = function()
-        nvim_biscuits.decorate_nodes(bufnr, parser_lang)
-    end
-
     vim.cmd("highlight default link " ..
                 make_biscuit_hl_group_name(language_name) .. " BiscuitColor")
 
@@ -299,29 +271,37 @@ nvim_biscuits.BufferAttach = function(bufnr, lang)
     local on_events = table.concat(final_config.on_events, ",")
     local augroup_name = "Biscuits_" .. bufnr
     if on_events ~= "" then
-        vim.api.nvim_exec(string.format(
-                             [[
-          augroup %s
-            au!
-            au %s <buffer=%s> :lua require("nvim-biscuits").decorate_nodes(%s, "%s")
-          augroup END
-        ]], augroup_name, on_events, bufnr, bufnr, parser_lang), false)
+        vim.api.nvim_create_autocmd(final_config.on_events, {
+            group = vim.api.nvim_create_augroup(augroup_name, { clear = true }),
+            buffer = bufnr,
+            callback = function()
+                nvim_biscuits.debounced_decorate(bufnr, parser_lang)
+            end,
+            desc = "Biscuits event-based update"
+        })
     elseif final_config.cursor_line_only == true then
-        vim.api.nvim_exec(string.format(
-                             [[
-          augroup %s
-            au!
-            au %s <buffer=%s> :lua require("nvim-biscuits").decorate_nodes(%s, "%s")
-          augroup END
-        ]], augroup_name, "CursorMoved,CursorMovedI", bufnr, bufnr,
-                                 parser_lang), false)
+        vim.api.nvim_create_autocmd({ "CursorMoved", "CursorMovedI" }, {
+            group = vim.api.nvim_create_augroup(augroup_name, { clear = true }),
+            buffer = bufnr,
+            callback = function()
+                nvim_biscuits.debounced_decorate(bufnr, parser_lang)
+            end,
+            desc = "Biscuits cursor-line update"
+        })
     else
         vim.api.nvim_buf_attach(bufnr, false, {
-            on_lines = on_lines,
+            on_lines = function()
+                nvim_biscuits.debounced_decorate(bufnr, parser_lang)
+            end,
 
             on_detach = function()
                 attached_buffers[bufnr] = nil
                 cleanup_buffer_augroup(bufnr)
+                if timers[bufnr] then
+                    timers[bufnr]:stop()
+                    timers[bufnr]:close()
+                    timers[bufnr] = nil
+                end
             end
         })
     end
@@ -380,6 +360,11 @@ nvim_biscuits.setup = function(user_config)
                 detach = function(bufnr)
                     attached_buffers[bufnr] = nil
                     cleanup_buffer_augroup(bufnr)
+                    if timers[bufnr] then
+                        timers[bufnr]:stop()
+                        timers[bufnr]:close()
+                        timers[bufnr] = nil
+                    end
                 end,
                 is_supported = function(lang)
                     local language_name = normalize_language_name(lang)
